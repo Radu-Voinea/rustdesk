@@ -650,9 +650,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   }
 
   bool get showCursorPaint =>
-      !gFFI.ffiModel.isPeerAndroid &&
-      !gFFI.canvasModel.cursorEmbedded &&
-      !gFFI.inputModel.relativeMouseMode.value;
+      !gFFI.ffiModel.isPeerAndroid && !gFFI.canvasModel.cursorEmbedded;
 
   Widget getBodyForMobile() {
     final keyboardIsVisible = keyboardVisibilityController.isVisible;
@@ -701,7 +699,8 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
             ),
           ];
           if (showCursorPaint) {
-            paints.add(CursorPaint(widget.id));
+            paints.add(CursorPaint(widget.id,
+              relativeMode: gFFI.inputModel.relativeMouseMode.value));
           }
           if (gFFI.ffiModel.touchMode) {
             paints.add(FloatingMouse(
@@ -723,7 +722,8 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
       final cursor = bind.sessionGetToggleOptionSync(
           sessionId: sessionId, arg: 'show-remote-cursor');
       if (ffiModel.keyboard || cursor) {
-        paints.add(CursorPaint(widget.id));
+        paints.add(CursorPaint(widget.id,
+              relativeMode: gFFI.inputModel.relativeMouseMode.value));
       }
     }
     return Container(
@@ -1163,7 +1163,10 @@ class ImagePaint extends StatelessWidget {
 
 class CursorPaint extends StatelessWidget {
   late final String id;
-  CursorPaint(this.id);
+  // When true, render a synthetic centered cursor until the remote reports its
+  // real cursor position (relative mouse mode has no local cursor to track).
+  final bool relativeMode;
+  CursorPaint(this.id, {this.relativeMode = false});
 
   @override
   Widget build(BuildContext context) {
@@ -1179,6 +1182,19 @@ class CursorPaint extends StatelessWidget {
         image = preDefaultCursor.image;
         hotx = preDefaultCursor.image!.width / 2;
         hoty = preDefaultCursor.image!.height / 2;
+      }
+    }
+
+    // Cursor position in remote-display-local coordinates.
+    double mx = m.x;
+    double my = m.y;
+    // Synthetic fallback for relative mouse mode: draw at the remote display
+    // center until the first real remote position arrives.
+    if (relativeMode && !m.gotRemotePosition) {
+      final rect = c.parent.target!.ffiModel.rect;
+      if (rect != null) {
+        mx = rect.width / 2;
+        my = rect.height / 2;
       }
     }
     if (preForbiddenCursor.image != null &&
@@ -1205,8 +1221,8 @@ class CursorPaint extends StatelessWidget {
     return CustomPaint(
       painter: ImagePainter(
           image: image,
-          x: (m.x - hotx) * factor + c.x / s2,
-          y: (m.y - hoty) * factor + (c.y + adjust) / s2,
+          x: (mx - hotx) * factor + c.x / s2,
+          y: (my - hoty) * factor + (c.y + adjust) / s2,
           scale: s2),
     );
   }

@@ -2,6 +2,8 @@
 
 #include "bump_mouse.h"
 
+#include "wayland_relative_pointer.h"
+
 #include <flutter_linux/flutter_linux.h>
 #ifdef GDK_WINDOWING_X11
 #include <gdk/gdkx.h>
@@ -87,6 +89,27 @@ static void side_buttons_init_for_window(GtkWindow* window, FlMethodChannel* cha
     G_CALLBACK(on_side_button_event), channel);
 }
 
+// Create the "org.rustdesk.rustdesk/host" channel for a view and attach the
+// shared handler. The FlView is passed as user_data (ref'd for the channel's
+// lifetime) so the handler can locate the view's toplevel window, e.g. to lock
+// the pointer for native relative mouse mode. Used for the main window and for
+// each sub-window (remote sessions run in sub-windows created by the
+// desktop_multi_window plugin, and each needs its own host channel so that
+// native mouse deltas are routed back to the right Flutter engine).
+static FlMethodChannel* host_channel_create_for_view(FlView* view) {
+  g_autoptr(FlStandardMethodCodec) codec = fl_standard_method_codec_new();
+  FlMethodChannel* channel = fl_method_channel_new(
+    fl_engine_get_binary_messenger(fl_view_get_engine(view)),
+    "org.rustdesk.rustdesk/host",
+    FL_METHOD_CODEC(codec));
+  fl_method_channel_set_method_call_handler(
+    channel,
+    host_channel_call_handler,
+    g_object_ref(view),
+    (GDestroyNotify)g_object_unref);
+  return channel;
+}
+
 static void on_subwindow_created(FlPluginRegistry* registry) {
 #if defined(GDK_WINDOWING_WAYLAND) && defined(HAS_KEYBOARD_SHORTCUTS_INHIBIT)
   wayland_shortcuts_inhibit_init_for_subwindow(registry);
@@ -100,6 +123,15 @@ static void on_subwindow_created(FlPluginRegistry* registry) {
     if (channel == NULL) return;
     side_buttons_init_for_window(GTK_WINDOW(toplevel), channel);
     g_object_unref(channel);  // window now owns a ref via g_object_set_data_full
+
+    // Set up the host channel (native relative mouse mode etc.) for the
+    // sub-window, unless one is already attached. Stored on the window so it is
+    // freed together with the window.
+    if (g_object_get_data(G_OBJECT(toplevel), "host-channel") == NULL) {
+      FlMethodChannel* host_channel = host_channel_create_for_view(view);
+      g_object_set_data_full(G_OBJECT(toplevel), "host-channel",
+                             host_channel, (GDestroyNotify)g_object_unref);
+    }
   }
 }
 
@@ -179,16 +211,7 @@ static void my_application_activate(GApplication* application) {
 
   fl_register_plugins(FL_PLUGIN_REGISTRY(view));
 
-  g_autoptr(FlStandardMethodCodec) codec = fl_standard_method_codec_new();
-  self->host_channel = fl_method_channel_new(
-    fl_engine_get_binary_messenger(fl_view_get_engine(view)),
-    "org.rustdesk.rustdesk/host",
-    FL_METHOD_CODEC(codec));
-  fl_method_channel_set_method_call_handler(
-    self->host_channel,
-    host_channel_call_handler,
-    self,
-    nullptr);
+  self->host_channel = host_channel_create_for_view(view);
 
   // Forward side mouse button events (back/forward) to Dart on the main window.
   FlMethodChannel* side_channel = side_buttons_create_channel(fl_view_get_engine(view));
@@ -292,7 +315,37 @@ void host_channel_call_handler(FlMethodChannel* channel, FlMethodCall* method_ca
     }
 
     fl_value_unref(result_value);
+    return;
   }
+
+  // Native relative mouse mode (Wayland pointer lock + relative pointer).
+  // The Dart RelativeMouseModel uses this path on Linux/Wayland instead of
+  // cursor warping (which Wayland forbids).
+  if (strcmp(fl_method_call_get_name(method_call), "enableNativeRelativeMouseMode") == 0) {
+    bool ok = false;
+#if defined(GDK_WINDOWING_WAYLAND) && defined(HAS_WAYLAND_RELATIVE_POINTER)
+    if (user_data != nullptr && FL_IS_VIEW(user_data)) {
+      GtkWidget* toplevel = gtk_widget_get_toplevel(GTK_WIDGET(FL_VIEW(user_data)));
+      if (toplevel != nullptr && GTK_IS_WINDOW(toplevel)) {
+        ok = wayland_relative_pointer_enable(channel, GTK_WINDOW(toplevel));
+      }
+    }
+#endif
+    g_autoptr(FlValue) result_value = fl_value_new_bool(ok);
+    fl_method_call_respond_success(method_call, result_value, nullptr);
+    return;
+  }
+
+  if (strcmp(fl_method_call_get_name(method_call), "disableNativeRelativeMouseMode") == 0) {
+#if defined(GDK_WINDOWING_WAYLAND) && defined(HAS_WAYLAND_RELATIVE_POINTER)
+    wayland_relative_pointer_disable();
+#endif
+    g_autoptr(FlValue) result_value = fl_value_new_null();
+    fl_method_call_respond_success(method_call, result_value, nullptr);
+    return;
+  }
+
+  fl_method_call_respond_not_implemented(method_call, nullptr);
 }
 
 GtkWidget *find_gl_area(GtkWidget *widget)

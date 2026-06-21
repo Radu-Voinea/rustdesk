@@ -353,6 +353,67 @@ fn update_last_cursor_pos(x: i32, y: i32) {
     }
 }
 
+// --- Estimated cursor position (fallback for hosts that can't read the cursor,
+// e.g. Wayland). The estimate is fed into the cursor-position service only when
+// get_cursor_pos() fails, so X11/Windows/macOS keep reporting the real position.
+
+#[inline]
+fn set_cursor_pos_bounds(minx: i32, maxx: i32, miny: i32, maxy: i32) {
+    *CURSOR_POS_BOUNDS.lock().unwrap() = (minx, maxx, miny, maxy);
+    let mut est = ESTIMATED_CURSOR_POS.lock().unwrap();
+    if let Some((x, y)) = *est {
+        *est = Some((x.clamp(minx, maxx), y.clamp(miny, maxy)));
+    }
+}
+
+#[inline]
+fn set_estimated_cursor_abs(x: i32, y: i32) {
+    let (minx, maxx, miny, maxy) = *CURSOR_POS_BOUNDS.lock().unwrap();
+    *ESTIMATED_CURSOR_POS.lock().unwrap() = Some((x.clamp(minx, maxx), y.clamp(miny, maxy)));
+}
+
+#[inline]
+fn add_estimated_cursor_rel(dx: i32, dy: i32) {
+    let (minx, maxx, miny, maxy) = *CURSOR_POS_BOUNDS.lock().unwrap();
+    let mut est = ESTIMATED_CURSOR_POS.lock().unwrap();
+    // Start from screen center if we have no estimate yet.
+    let cur = *est;
+    let (cx, cy) = cur.unwrap_or((minx + (maxx - minx) / 2, miny + (maxy - miny) / 2));
+    *est = Some(((cx + dx).clamp(minx, maxx), (cy + dy).clamp(miny, maxy)));
+    static CNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    if CNT.fetch_add(1, Ordering::Relaxed) % 30 == 0 {
+        log::info!(
+            "[relmouse] rel delta ({},{}) bounds=({},{},{},{}) -> est {:?}",
+            dx, dy, minx, maxx, miny, maxy, *est
+        );
+    }
+}
+
+#[inline]
+fn estimated_cursor_pos() -> Option<(i32, i32)> {
+    *ESTIMATED_CURSOR_POS.lock().unwrap()
+}
+
+// Whether to drive the cursor by absolute-positioning our estimate. True on
+// Wayland, where the real cursor position can't be read back: placing the cursor
+// exactly at the estimate keeps the controller's rendered cursor accurate (no
+// acceleration drift / start offset). On X11/Windows/macOS we inject true
+// relative motion and read the real position instead. Cached (avoids loginctl).
+fn is_wayland_inject() -> bool {
+    use std::sync::atomic::AtomicI8;
+    static CACHE: AtomicI8 = AtomicI8::new(-1);
+    let v = CACHE.load(Ordering::Relaxed);
+    if v >= 0 {
+        return v == 1;
+    }
+    #[cfg(target_os = "linux")]
+    let w = crate::platform::linux::is_desktop_wayland();
+    #[cfg(not(target_os = "linux"))]
+    let w = false;
+    CACHE.store(i8::from(w), Ordering::Relaxed);
+    w
+}
+
 fn run_pos(sp: EmptyExtraFieldService, state: &mut StatePos) -> ResultType<()> {
     let (_, (x, y)) = *LATEST_SYS_CURSOR_POS.lock().unwrap();
     if x == INVALID_CURSOR_POS || y == INVALID_CURSOR_POS {
@@ -375,6 +436,17 @@ fn run_pos(sp: EmptyExtraFieldService, state: &mut StatePos) -> ResultType<()> {
                 0
             }
         };
+        // In relative mouse mode the controlling client only sends deltas and
+        // never learns the resulting absolute cursor position. Normally we
+        // exclude the most-recent input source (it already knows where it moved
+        // the cursor), but a relative-mode client does not, so keep sending it
+        // the position. Without this it cannot render the remote cursor.
+        let exclude = if exclude != 0 && is_relative_mouse_active(exclude) {
+            0
+        } else {
+            exclude
+        };
+        log::info!("[relmouse] pos send ({},{}) exclude={}", x, y, exclude);
         sp.send_without(msg_out, exclude);
     }
     state.cursor_pos = (x, y);
@@ -452,6 +524,13 @@ lazy_static::lazy_static! {
     static ref KEYS_DOWN: Arc<Mutex<HashMap<KeysDown, Instant>>> = Default::default();
     static ref LATEST_PEER_INPUT_CURSOR: Arc<Mutex<Input>> = Default::default();
     static ref LATEST_SYS_CURSOR_POS: Arc<Mutex<(Option<Instant>, (i32, i32))>> = Arc::new(Mutex::new((None, (INVALID_CURSOR_POS, INVALID_CURSOR_POS))));
+    // Estimated cursor position + display bounds (minx, maxx, miny, maxy).
+    // On hosts where the real cursor position can't be read back (e.g. Wayland),
+    // we accumulate the injected mouse movement so the controlling side can still
+    // render a tracking cursor. Used only as a fallback when get_cursor_pos()
+    // returns None. See [add_estimated_cursor_rel].
+    static ref ESTIMATED_CURSOR_POS: Arc<Mutex<Option<(i32, i32)>>> = Default::default();
+    static ref CURSOR_POS_BOUNDS: Arc<Mutex<(i32, i32, i32, i32)>> = Arc::new(Mutex::new((0, 1920, 0, 1080)));
     // Track connections that are currently using relative mouse movement.
     // Used to disable whiteboard/cursor display for all events while in relative mode.
     static ref RELATIVE_MOUSE_CONNS: Arc<Mutex<std::collections::HashSet<i32>>> = Default::default();
@@ -522,7 +601,14 @@ pub fn try_start_record_cursor_pos() -> Option<thread::JoinHandle<()>> {
     }
 
     RECORD_CURSOR_POS_RUNNING.store(true, Ordering::SeqCst);
-    let handle = thread::spawn(|| {
+    // On Wayland, get_cursor_pos() reads the XWayland pointer, which goes stale
+    // when the cursor is over Wayland-native surfaces. So prefer our accumulated
+    // estimate there. Computed once (it spawns loginctl) and reused in the loop.
+    #[cfg(target_os = "linux")]
+    let is_wayland = crate::platform::linux::is_desktop_wayland();
+    #[cfg(target_os = "linux")]
+    log::info!("[relmouse] record_cursor_pos started, is_wayland={}", is_wayland);
+    let handle = thread::spawn(move || {
         let interval = time::Duration::from_millis(33);
         loop {
             if !RECORD_CURSOR_POS_RUNNING.load(Ordering::SeqCst) {
@@ -530,7 +616,15 @@ pub fn try_start_record_cursor_pos() -> Option<thread::JoinHandle<()>> {
             }
 
             let now = time::Instant::now();
-            if let Some((x, y)) = crate::get_cursor_pos() {
+            #[cfg(target_os = "linux")]
+            let pos = if is_wayland {
+                estimated_cursor_pos().or_else(crate::get_cursor_pos)
+            } else {
+                crate::get_cursor_pos().or_else(estimated_cursor_pos)
+            };
+            #[cfg(not(target_os = "linux"))]
+            let pos = crate::get_cursor_pos();
+            if let Some((x, y)) = pos {
                 update_last_cursor_pos(x, y);
             }
             let elapsed = now.elapsed();
@@ -679,6 +773,9 @@ pub async fn update_mouse_resolution(minx: i32, maxx: i32, miny: i32, maxy: i32)
 
 #[cfg(target_os = "linux")]
 async fn set_uinput_resolution(minx: i32, maxx: i32, miny: i32, maxy: i32) -> ResultType<()> {
+    // Keep the estimated-cursor bounds in sync with the uinput display range so
+    // the Wayland fallback position is clamped to the real screen.
+    set_cursor_pos_bounds(minx, maxx, miny, maxy);
     super::uinput::client::set_resolution(minx, maxx, miny, maxy).await
 }
 
@@ -1099,6 +1196,7 @@ pub fn handle_mouse_simulation_(evt: &MouseEvent, conn: i32) {
             // Switching back to absolute movement implicitly disables relative mouse mode.
             set_relative_mouse_active(conn, false);
             en.mouse_move_to(evt.x, evt.y);
+            set_estimated_cursor_abs(evt.x, evt.y);
             *LATEST_PEER_INPUT_CURSOR.lock().unwrap() = Input {
                 conn,
                 time: get_time(),
@@ -1121,8 +1219,25 @@ pub fn handle_mouse_simulation_(evt: &MouseEvent, conn: i32) {
             let dy = evt
                 .y
                 .clamp(-MAX_RELATIVE_MOUSE_DELTA, MAX_RELATIVE_MOUSE_DELTA);
-            en.mouse_move_relative(dx, dy);
-            // Get actual cursor position after relative movement for tracking
+            // Accumulate an estimated cursor position. Do NOT sync this from
+            // get_cursor_pos(): on Wayland that reads a stale XWayland value and
+            // would clobber the estimate every move.
+            add_estimated_cursor_rel(dx, dy);
+            // On Wayland the real cursor position can't be read back, so the
+            // controller renders our estimate. To keep rendered == real, place
+            // the cursor *absolutely* at the estimate (libinput applies no
+            // acceleration to absolute motion, so there is no drift or offset).
+            // Elsewhere, inject true relative motion and read the real position.
+            if is_wayland_inject() {
+                if let Some((ex, ey)) = estimated_cursor_pos() {
+                    en.mouse_move_to(ex, ey);
+                } else {
+                    en.mouse_move_relative(dx, dy);
+                }
+            } else {
+                en.mouse_move_relative(dx, dy);
+            }
+            // Get actual cursor position after movement for tracking.
             if let Some((x, y)) = crate::get_cursor_pos() {
                 *LATEST_PEER_INPUT_CURSOR.lock().unwrap() = Input {
                     conn,

@@ -17,6 +17,7 @@
 set -euo pipefail
 
 FRB_VERSION="1.80.1"
+CARGO_EXPAND_VERSION="1.0.95"
 
 # --- sanity checks -----------------------------------------------------------
 if [[ ! -f "Cargo.toml" || ! -d "flutter" ]]; then
@@ -42,26 +43,35 @@ done
 echo ">> ensuring git submodules (hbb_common etc.) are initialized"
 git submodule update --init --recursive
 
-# --- flutter_rust_bridge codegen (generated_bridge.dart is gitignored) -------
-if ! command -v flutter_rust_bridge_codegen >/dev/null 2>&1; then
-  echo ">> installing flutter_rust_bridge_codegen ${FRB_VERSION}"
+# --- codegen toolchain (frb 1.80.1 drives ffigen + cargo-expand) -------------
+# cargo-expand needs a nightly rustc for macro expansion.
+rustup toolchain install nightly --profile minimal >/dev/null 2>&1 || true
+command -v cargo-expand >/dev/null 2>&1 || \
+  cargo install cargo-expand --version "${CARGO_EXPAND_VERSION}" --locked
+command -v flutter_rust_bridge_codegen >/dev/null 2>&1 || \
   cargo install flutter_rust_bridge_codegen --version "${FRB_VERSION}" --features "uuid" --locked
-fi
 
+# --- flutter deps (MUST precede codegen: frb runs `flutter pub run ffigen`,
+#     which needs flutter/.dart_tool/package_config.json) -----------------------
+echo ">> flutter pub get"
+flutter config --enable-linux-desktop >/dev/null 2>&1 || true
+( cd flutter && flutter pub get )
+
+# --- flutter_rust_bridge codegen (generated_bridge.dart is gitignored) -------
 if [[ ! -f "flutter/lib/generated_bridge.dart" || "${1:-}" == "--regen-bridge" ]]; then
   echo ">> generating Dart/Rust FFI bridge"
   flutter_rust_bridge_codegen \
     --rust-input ./src/flutter_ffi.rs \
-    --dart-output ./flutter/lib/generated_bridge.dart
+    --dart-output ./flutter/lib/generated_bridge.dart \
+    --c-output ./flutter/macos/Runner/bridge_generated.h
 fi
-
-# --- flutter deps ------------------------------------------------------------
-echo ">> flutter pub get"
-( cd flutter && flutter pub get )
 
 # --- Rust shared library (must precede 'flutter build linux') ----------------
 # The Flutter CMake bundle copies target/release/liblibrustdesk.so into the
 # bundle as lib/librustdesk.so, so build it first.
+# GCC 13+ (e.g. Ubuntu 26.04 / GCC 15) needs <cstdint> force-included for the
+# bundled libwebm (rust-webm) C++; harmless on older toolchains.
+export CXXFLAGS="${CXXFLAGS:+$CXXFLAGS }-include cstdint"
 echo ">> building Rust library (liblibrustdesk.so)"
 cargo build --locked --features flutter --lib --release
 

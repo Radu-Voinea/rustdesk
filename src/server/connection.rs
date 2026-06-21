@@ -1868,9 +1868,11 @@ impl Connection {
                 if !self.peer_keyboard_enabled() && !self.show_remote_cursor {
                     noperms.push(NAME_CURSOR);
                 }
-                if !self.show_remote_cursor {
-                    noperms.push(NAME_POS);
-                }
+                // NAME_POS (cursor position) is always subscribed: relative mouse
+                // mode needs it to render a tracking cursor on the controller even
+                // when "show remote cursor" is off. The data is tiny, and the client
+                // still decides whether to draw the cursor.
+                // (was: if !self.show_remote_cursor { noperms.push(NAME_POS); })
                 if !self.follow_remote_window {
                     noperms.push(NAME_WINDOW_FOCUS);
                 }
@@ -4283,10 +4285,12 @@ impl Connection {
                         self.inner.clone(),
                         self.peer_keyboard_enabled() || self.show_remote_cursor,
                     );
+                    // Keep NAME_POS subscribed regardless of show_remote_cursor so
+                    // relative mouse mode always gets cursor positions.
                     s.write().unwrap().subscribe(
                         NAME_POS,
                         self.inner.clone(),
-                        self.show_remote_cursor,
+                        true,
                     );
                 }
             }

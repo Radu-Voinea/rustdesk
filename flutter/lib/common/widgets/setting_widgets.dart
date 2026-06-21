@@ -233,6 +233,7 @@ List<(String, String)> otherDefaultSettings() {
     ('True color (4:4:4)', kOptionI444),
     ('Reverse mouse wheel', kKeyReverseMouseWheel),
     ('swap-left-right-mouse', kOptionSwapLeftRightMouse),
+    if (isDesktop) ('Relative mouse mode', kOptionRelativeMouseModeDefault),
     if (isDesktop)
       (
         'Show displays as individual windows',

@@ -305,6 +305,12 @@ const int kMaxRelativeMouseDelta = 10000;
 /// intentional quick toggles but large enough to prevent accidental double-triggers.
 const int kRelativeMouseModeToggleDebounceMs = 150;
 
+/// Global default option key for relative mouse mode.
+/// When set to 'Y' in "Settings -> Display -> Other default options", relative
+/// mouse mode is auto-enabled on every new desktop connection (once the remote
+/// image size is known and the peer/platform supports it).
+const String kOptionRelativeMouseModeDefault = "relative-mouse-mode";
+
 // incomming (should be incoming) is kept, because change it will break the previous setting.
 const String kKeyPrinterIncomingJobAction = 'printer-incomming-job-action';
 const String kValuePrinterIncomingJobDismiss = 'dismiss';

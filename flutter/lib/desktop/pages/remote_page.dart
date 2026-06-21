@@ -657,13 +657,21 @@ class _RemotePageState extends State<RemotePage>
     ];
 
     if (!_ffi.canvasModel.cursorEmbedded) {
-      paints
-          .add(Obx(() => _showRemoteCursor.isFalse || _remoteCursorMoved.isFalse
-              ? Offstage()
-              : CursorPaint(
-                  id: widget.id,
-                  zoomCursor: _zoomCursor,
-                )));
+      paints.add(Obx(() {
+        // In relative mouse mode the local OS cursor is hidden/locked, so always
+        // render a cursor: the real remote cursor, or a synthetic centered
+        // fallback (drawn by CursorPaint) until the first remote position arrives.
+        final relativeMode = _ffi.inputModel.relativeMouseMode.value;
+        final show = relativeMode ||
+            (_showRemoteCursor.isTrue && _remoteCursorMoved.isTrue);
+        return show
+            ? CursorPaint(
+                id: widget.id,
+                zoomCursor: _zoomCursor,
+                relativeMode: relativeMode,
+              )
+            : Offstage();
+      }));
     }
     paints.add(
       Positioned(
@@ -1041,11 +1049,15 @@ class _ImagePaintState extends State<ImagePaint> {
 class CursorPaint extends StatelessWidget {
   final String id;
   final RxBool zoomCursor;
+  // When true, render a synthetic centered cursor until the remote reports its
+  // real cursor position (relative mouse mode hides/locks the local cursor).
+  final bool relativeMode;
 
   const CursorPaint({
     Key? key,
     required this.id,
     required this.zoomCursor,
+    this.relativeMode = false,
   }) : super(key: key);
 
   @override
@@ -1058,6 +1070,21 @@ class CursorPaint extends StatelessWidget {
       if (preDefaultCursor.image != null) {
         hotx = preDefaultCursor.image!.width / 2;
         hoty = preDefaultCursor.image!.height / 2;
+      }
+    }
+
+    // Cursor position in remote-display-local coordinates.
+    double mx = m.x;
+    double my = m.y;
+    // Synthetic fallback: in relative mouse mode, before the remote reports its
+    // first cursor position (or if the remote app hides its own cursor), draw a
+    // default cursor at the center of the remote display so the user always has
+    // a pointer. The transform below maps it to the center of the view.
+    if (relativeMode && !m.gotRemotePosition) {
+      final rect = c.parent.target!.ffiModel.rect;
+      if (rect != null) {
+        mx = rect.width / 2;
+        my = rect.height / 2;
       }
     }
 
@@ -1081,13 +1108,13 @@ class CursorPaint extends StatelessWidget {
       }
     }
 
-    double x = (m.x - hotx) * c.scale + cx;
-    double y = (m.y - hoty) * c.scale + cy;
+    double x = (mx - hotx) * c.scale + cx;
+    double y = (my - hoty) * c.scale + cy;
     double scale = 1.0;
     final isViewOriginal = c.viewStyle.style == kRemoteViewStyleOriginal;
     if (zoomCursor.value || isViewOriginal) {
-      x = m.x - hotx + cx / c.scale;
-      y = m.y - hoty + cy / c.scale;
+      x = mx - hotx + cx / c.scale;
+      y = my - hoty + cy / c.scale;
       scale = c.scale;
     }
 

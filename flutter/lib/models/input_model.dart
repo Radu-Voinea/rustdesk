@@ -462,6 +462,10 @@ class InputModel {
 
   // Relative mouse mode (for games/3D apps).
   final relativeMouseMode = false.obs;
+  // One-shot guard: auto-enable relative mouse mode from the global default
+  // option at most once per session (fired when the remote image size is first
+  // known). See [maybeAutoEnableRelativeMouseMode].
+  bool _autoRelativeMouseAttempted = false;
   late final RelativeMouseModel _relativeMouse;
   // Callback to cancel external throttle timer when relative mouse mode is disabled.
   VoidCallback? onRelativeMouseModeDisabled;
@@ -1212,6 +1216,32 @@ class InputModel {
   /// Update the image widget size for center calculation.
   void updateImageWidgetSize(Size size) {
     _relativeMouse.updateImageWidgetSize(size);
+    // The remote image now has a real size, which desktop relative mouse mode
+    // requires (it rejects enabling while _imageWidgetSize == null). This is the
+    // earliest reliable point to honor the global "relative mouse mode" default.
+    maybeAutoEnableRelativeMouseMode();
+  }
+
+  /// Auto-enable relative mouse mode once per session if the user set the global
+  /// default option ("Settings -> Display -> Other default options"). Desktop
+  /// only: mobile uses the virtual joystick, where auto-enabling is not useful.
+  void maybeAutoEnableRelativeMouseMode() {
+    if (_autoRelativeMouseAttempted) return;
+    if (!isDesktop) return;
+    if (relativeMouseMode.value) {
+      _autoRelativeMouseAttempted = true;
+      return;
+    }
+    // Requires keyboard permission and a peer/platform that supports it.
+    if (!keyboardPerm || !isRelativeMouseModeSupported) return;
+    if (bind.mainGetUserDefaultOption(key: kOptionRelativeMouseModeDefault) !=
+        'Y') {
+      // Mark attempted so we don't re-check on every size update this session.
+      _autoRelativeMouseAttempted = true;
+      return;
+    }
+    _autoRelativeMouseAttempted = true;
+    setRelativeMouseMode(true);
   }
 
   void toggleRelativeMouseMode() {

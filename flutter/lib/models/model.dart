@@ -2934,6 +2934,10 @@ class CursorModel with ChangeNotifier {
   final _cacheKeys = <String>{};
   double _x = -10000;
   double _y = -10000;
+  // Whether a real remote cursor position has been received from the peer.
+  // Used by relative mouse mode to decide between rendering the true remote
+  // cursor and a synthetic centered fallback cursor.
+  bool _gotRemotePosition = false;
   // int.parse(evt['id']) may cause FormatException
   // So we use String here.
   String _id = "-1";
@@ -3019,6 +3023,9 @@ class CursorModel with ChangeNotifier {
 
   double get x => _x - _displayOriginX;
   double get y => _y - _displayOriginY;
+
+  /// Whether a real remote cursor position has been received from the peer.
+  bool get gotRemotePosition => _gotRemotePosition;
 
   double get devicePixelRatio => parent.target!.canvasModel.devicePixelRatio;
 
@@ -3436,6 +3443,7 @@ class CursorModel with ChangeNotifier {
     }
     _x = double.parse(evt['x']);
     _y = double.parse(evt['y']);
+    _gotRemotePosition = true;
     try {
       RemoteCursorMovedState.find(id).value = true;
     } catch (e) {
@@ -3468,7 +3476,8 @@ class CursorModel with ChangeNotifier {
 
   clear() {
     _x = -10000;
-    _x = -10000;
+    _y = -10000;
+    _gotRemotePosition = false;
     _image = null;
     _firstUpdateMouseTime = null;
     gotMouseControl = true;

@@ -54,10 +54,34 @@ class RelativeMouseModel {
   static RelativeMouseModel? _activeNativeModel;
   static bool _hostChannelInitialized = false;
 
+  // Whether this platform uses the native OS-level relative mouse path
+  // (pointer lock + raw delta over the 'org.rustdesk.rustdesk/host' channel)
+  // instead of the Flutter cursor-warp/recenter approach:
+  //   - macOS: CGAssociateMouseAndMouseCursorPosition + NSEvent monitor.
+  //   - Linux/Wayland: zwp_pointer_constraints_v1 + zwp_relative_pointer_v1.
+  // Cached after first evaluation to avoid repeated FFI calls on hot paths
+  // (e.g. _isNativeRelativeMouseModeActive is checked on every pointer move).
+  static bool? _useNativeCache;
+  static bool get _useNativeRelativeMouse {
+    final cached = _useNativeCache;
+    if (cached != null) return cached;
+    bool v = false;
+    if (isWeb) {
+      v = false;
+    } else if (isMacOS) {
+      v = true;
+    } else if (isDesktop && isLinux && bind.mainCurrentIsWayland()) {
+      v = true;
+    }
+    _useNativeCache = v;
+    return v;
+  }
+
   /// Initialize the host channel for native relative mouse mode.
-  /// This should be called once when the app starts on macOS.
+  /// This should be called once when the app starts on a platform that uses the
+  /// native path (macOS, or Linux/Wayland).
   static void initHostChannel() {
-    if (!isMacOS) return;
+    if (!_useNativeRelativeMouse) return;
     if (_hostChannelInitialized) return;
     _hostChannelInitialized = true;
 
@@ -86,7 +110,7 @@ class RelativeMouseModel {
   }
 
   Future<bool> _enableNativeRelativeMouseMode() async {
-    if (!isMacOS) return false;
+    if (!_useNativeRelativeMouse) return false;
     if (_hostChannel == null) {
       initHostChannel();
       if (_hostChannel == null) return false;
@@ -117,7 +141,7 @@ class RelativeMouseModel {
   }
 
   Future<void> _disableNativeRelativeMouseMode() async {
-    if (!isMacOS) return;
+    if (!_useNativeRelativeMouse) return;
     if (_hostChannel == null) return;
 
     // Only the owning model should disable native mode to avoid
@@ -139,7 +163,7 @@ class RelativeMouseModel {
 
   // Whether native relative mouse mode is currently active for this model
   bool get _isNativeRelativeMouseModeActive =>
-      isMacOS && _activeNativeModel == this;
+      _useNativeRelativeMouse && _activeNativeModel == this;
 
   // Pointer lock center in LOCAL widget coordinates (for delta calculation)
   Offset? _pointerLockCenterLocal;
@@ -188,17 +212,15 @@ class RelativeMouseModel {
   VoidCallback? onDisabled;
 
   bool get isSupported {
-    // On Linux/Wayland, cursor warping is not supported, hide the option entirely.
-    if (isDesktop && isLinux && bind.mainCurrentIsWayland()) {
-      return false;
-    }
-    // Relative mouse mode is unsupported on remote Linux:
-    // 1. Long-press key events are unsupported.
-    // 2. The Wayland display server lacks cursor warping support.
-    final platform = peerPlatform();
-    if (platform == kPeerPlatformLinux) {
-      return false;
-    }
+    // On Linux/Wayland the local client cannot warp the cursor, but it can lock
+    // the pointer and read raw deltas via the native path (zwp_pointer_constraints
+    // + zwp_relative_pointer), so Wayland is supported here. See
+    // [_useNativeRelativeMouse].
+    //
+    // Controlling a Linux (controlled) host is also supported, but the controlled
+    // side must be able to inject relative motion (RustDesk uses /dev/uinput on
+    // Wayland; on X11 it uses XTEST). If the controlled host lacks uinput access,
+    // the option still appears but movement won't reach the remote.
     final v = peerVersion();
     if (v.isEmpty) return false;
     return versionCmp(v, kMinVersionForRelativeMouseMode) >= 0;
@@ -407,9 +429,10 @@ class RelativeMouseModel {
       try {
         if (isDesktop) {
           final requestId = ++_enableRequestId;
-          if (isMacOS) {
-            // macOS: Use native relative mouse mode with CGAssociateMouseAndMouseCursorPosition
-            // This locks the cursor in place and provides raw delta via NSEvent monitor.
+          if (_useNativeRelativeMouse) {
+            // Native path (macOS, Linux/Wayland): lock the pointer in place and
+            // receive raw deltas. macOS uses CGAssociateMouseAndMouseCursorPosition
+            // + NSEvent; Wayland uses zwp_pointer_constraints + zwp_relative_pointer.
             _enableNativeRelativeMouseMode().then((success) {
               // Guard against stale callback: user may have toggled off relative mode
               // while the async enable was in progress.
@@ -422,7 +445,7 @@ class RelativeMouseModel {
               // Note: _enableNativeRelativeMouseMode already handles its own cleanup on failure
             });
           } else {
-            // Windows/Linux: Use Flutter-based cursor recenter approach
+            // Windows / Linux-X11: Use Flutter-based cursor warp/recenter approach.
             if (!getPointerInsideImage()) {
               _releaseCursorClip();
             }
@@ -462,9 +485,10 @@ class RelativeMouseModel {
 
       // Desktop only: cursor manipulation
       if (isDesktop) {
-        if (isMacOS) {
-          // macOS: Disable native relative mouse mode
-          // This already calls CGAssociateMouseAndMouseCursorPosition(1) to re-associate mouse
+        if (_useNativeRelativeMouse) {
+          // Native path (macOS, Linux/Wayland): release the pointer lock.
+          // macOS re-associates the mouse via CGAssociateMouseAndMouseCursorPosition(1);
+          // Wayland destroys the locked/relative pointer objects.
           _disableNativeRelativeMouseMode();
         } else {
           _releaseCursorClip();
@@ -893,6 +917,11 @@ class RelativeMouseModel {
   void _ensurePointerLockEngaged() {
     if (!enabled.value) return;
     if (!isDesktop) return;
+    // Native path (macOS, Linux/Wayland): the OS/compositor already locks the
+    // pointer, so no Flutter-side warp/clip/recenter is needed. Skipping this is
+    // important on Wayland, where the warp path would attempt an X11-only cursor
+    // move and could disable relative mode on a mouse button press.
+    if (_isNativeRelativeMouseModeActive) return;
 
     setPointerInsideImage(true);
 
@@ -1026,9 +1055,10 @@ class RelativeMouseModel {
       bypassKeyboardPerm: true,
     );
 
-    // macOS: Disable native relative mouse mode
-    // This already calls CGAssociateMouseAndMouseCursorPosition(1) to re-associate mouse
-    if (isMacOS) {
+    // Native path (macOS, Linux/Wayland): release the pointer lock.
+    // macOS re-associates the mouse via CGAssociateMouseAndMouseCursorPosition(1);
+    // Wayland destroys the locked/relative pointer objects.
+    if (_useNativeRelativeMouse) {
       _disableNativeRelativeMouseMode();
     } else {
       _releaseCursorClip();

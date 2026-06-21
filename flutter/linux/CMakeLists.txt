@@ -66,40 +66,57 @@ if(WAYLAND_SCANNER_PKG_FOUND)
   pkg_get_variable(WAYLAND_SCANNER wayland-scanner wayland_scanner)
 endif()
 
+# Helper: generate Wayland client header + private code for a protocol xml.
+# Appends the generated files to ${OUT_VAR}.
+function(WAYLAND_GENERATE PROTOCOL_XML BASENAME OUT_VAR)
+  add_custom_command(
+    OUTPUT "${WAYLAND_GENERATED_DIR}/${BASENAME}-client-protocol.h"
+    COMMAND ${WAYLAND_SCANNER} client-header
+      ${PROTOCOL_XML}
+      "${WAYLAND_GENERATED_DIR}/${BASENAME}-client-protocol.h"
+    DEPENDS ${PROTOCOL_XML}
+    VERBATIM
+  )
+  add_custom_command(
+    OUTPUT "${WAYLAND_GENERATED_DIR}/${BASENAME}-protocol.c"
+    COMMAND ${WAYLAND_SCANNER} private-code
+      ${PROTOCOL_XML}
+      "${WAYLAND_GENERATED_DIR}/${BASENAME}-protocol.c"
+    DEPENDS ${PROTOCOL_XML}
+    VERBATIM
+  )
+  set(${OUT_VAR}
+    ${${OUT_VAR}}
+    "${WAYLAND_GENERATED_DIR}/${BASENAME}-client-protocol.h"
+    "${WAYLAND_GENERATED_DIR}/${BASENAME}-protocol.c"
+    PARENT_SCOPE
+  )
+endfunction()
+
 if(WAYLAND_CLIENT_FOUND AND WAYLAND_PROTOCOLS_DIR AND WAYLAND_SCANNER)
+  set(WAYLAND_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/wayland-protocols")
+  file(MAKE_DIRECTORY ${WAYLAND_GENERATED_DIR})
+
+  # Keyboard shortcuts inhibit (capture Super/Alt+Tab etc. for the remote).
   set(KEYBOARD_SHORTCUTS_INHIBIT_PROTOCOL
     "${WAYLAND_PROTOCOLS_DIR}/unstable/keyboard-shortcuts-inhibit/keyboard-shortcuts-inhibit-unstable-v1.xml")
-
   if(EXISTS ${KEYBOARD_SHORTCUTS_INHIBIT_PROTOCOL})
-    set(WAYLAND_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/wayland-protocols")
-    file(MAKE_DIRECTORY ${WAYLAND_GENERATED_DIR})
-
-    # Generate client header
-    add_custom_command(
-      OUTPUT "${WAYLAND_GENERATED_DIR}/keyboard-shortcuts-inhibit-unstable-v1-client-protocol.h"
-      COMMAND ${WAYLAND_SCANNER} client-header
-        ${KEYBOARD_SHORTCUTS_INHIBIT_PROTOCOL}
-        "${WAYLAND_GENERATED_DIR}/keyboard-shortcuts-inhibit-unstable-v1-client-protocol.h"
-      DEPENDS ${KEYBOARD_SHORTCUTS_INHIBIT_PROTOCOL}
-      VERBATIM
-    )
-
-    # Generate protocol code
-    add_custom_command(
-      OUTPUT "${WAYLAND_GENERATED_DIR}/keyboard-shortcuts-inhibit-unstable-v1-protocol.c"
-      COMMAND ${WAYLAND_SCANNER} private-code
-        ${KEYBOARD_SHORTCUTS_INHIBIT_PROTOCOL}
-        "${WAYLAND_GENERATED_DIR}/keyboard-shortcuts-inhibit-unstable-v1-protocol.c"
-      DEPENDS ${KEYBOARD_SHORTCUTS_INHIBIT_PROTOCOL}
-      VERBATIM
-    )
-
-    set(WAYLAND_PROTOCOL_SOURCES
-      "${WAYLAND_GENERATED_DIR}/keyboard-shortcuts-inhibit-unstable-v1-client-protocol.h"
-      "${WAYLAND_GENERATED_DIR}/keyboard-shortcuts-inhibit-unstable-v1-protocol.c"
-    )
-
+    wayland_generate(${KEYBOARD_SHORTCUTS_INHIBIT_PROTOCOL}
+      "keyboard-shortcuts-inhibit-unstable-v1" WAYLAND_PROTOCOL_SOURCES)
     set(HAS_KEYBOARD_SHORTCUTS_INHIBIT TRUE)
+  endif()
+
+  # Pointer constraints + relative pointer (native relative mouse mode).
+  set(POINTER_CONSTRAINTS_PROTOCOL
+    "${WAYLAND_PROTOCOLS_DIR}/unstable/pointer-constraints/pointer-constraints-unstable-v1.xml")
+  set(RELATIVE_POINTER_PROTOCOL
+    "${WAYLAND_PROTOCOLS_DIR}/unstable/relative-pointer/relative-pointer-unstable-v1.xml")
+  if(EXISTS ${POINTER_CONSTRAINTS_PROTOCOL} AND EXISTS ${RELATIVE_POINTER_PROTOCOL})
+    wayland_generate(${POINTER_CONSTRAINTS_PROTOCOL}
+      "pointer-constraints-unstable-v1" WAYLAND_PROTOCOL_SOURCES)
+    wayland_generate(${RELATIVE_POINTER_PROTOCOL}
+      "relative-pointer-unstable-v1" WAYLAND_PROTOCOL_SOURCES)
+    set(HAS_WAYLAND_RELATIVE_POINTER TRUE)
   endif()
 endif()
 
@@ -113,6 +130,7 @@ add_executable(${BINARY_NAME}
   "main.cc"
   "my_application.cc"
   "wayland_shortcuts_inhibit.cc"
+  "wayland_relative_pointer.cc"
   "bump_mouse.cc"
   "bump_mouse_x11.cc"
   "${FLUTTER_MANAGED_DIR}/generated_plugin_registrant.cc"
@@ -132,6 +150,13 @@ target_link_libraries(${BINARY_NAME} PRIVATE ${CMAKE_DL_LIBS})
 # Wayland support for keyboard shortcuts inhibit
 if(HAS_KEYBOARD_SHORTCUTS_INHIBIT)
   target_compile_definitions(${BINARY_NAME} PRIVATE HAS_KEYBOARD_SHORTCUTS_INHIBIT)
+  target_include_directories(${BINARY_NAME} PRIVATE ${WAYLAND_GENERATED_DIR})
+  target_link_libraries(${BINARY_NAME} PRIVATE PkgConfig::WAYLAND_CLIENT)
+endif()
+
+# Wayland support for native relative mouse mode (pointer lock + relative pointer)
+if(HAS_WAYLAND_RELATIVE_POINTER)
+  target_compile_definitions(${BINARY_NAME} PRIVATE HAS_WAYLAND_RELATIVE_POINTER)
   target_include_directories(${BINARY_NAME} PRIVATE ${WAYLAND_GENERATED_DIR})
   target_link_libraries(${BINARY_NAME} PRIVATE PkgConfig::WAYLAND_CLIENT)
 endif()
