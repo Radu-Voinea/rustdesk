@@ -14,6 +14,12 @@ on:
   push:
     branches: [master]
 
+# Only keep the newest run per branch; a superseded build shouldn't race the
+# "latest" release publish or waste runner minutes.
+concurrency:
+  group: build-artifacts-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   FLUTTER_VERSION: "3.24.5"
   LLVM_VERSION: "15.0.6" # newer libclang mis-generates the aom bindings (opaque structs)
@@ -171,7 +177,46 @@ jobs:
         shell: bash
         run: ( cd flutter && flutter build windows --release )
 
+      - name: Package
+        shell: pwsh
+        run: Compress-Archive -Path flutter/build/windows/x64/runner/Release/* -DestinationPath rustdesk-windows-x64.zip
+
       - uses: actions/upload-artifact@v4
         with:
           name: rustdesk-windows-x64
-          path: flutter/build/windows/x64/runner/Release
+          path: rustdesk-windows-x64.zip
+
+  # --------------------------------------------------------------------------
+  # Publish both bundles to a single rolling "latest" GitHub Release so they are
+  # publicly downloadable: stable URLs, no GitHub login required (public repo),
+  # and no 90-day workflow-artifact expiry.
+  #   https://github.com/Radu-Voinea/rustdesk/releases/download/latest/rustdesk-windows-x64.zip
+  #   https://github.com/Radu-Voinea/rustdesk/releases/download/latest/rustdesk-linux-x64.tar.gz
+  release:
+    name: Publish GitHub Release
+    needs: [linux, windows]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write # GITHUB_TOKEN needs write to create/replace the release + tag
+    steps:
+      - name: Download built bundles
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Publish to GitHub Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          # Replace the rolling release and its tag so "latest" always points at
+          # this commit and serves only the freshest assets. `|| true` covers the
+          # very first run, when there is nothing to delete yet.
+          gh release delete latest --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" || true
+          gh release create latest \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Latest build (master)" \
+            --notes "Automated Flutter build from master @ ${GITHUB_SHA:0:7}." \
+            --prerelease \
+            artifacts/rustdesk-linux-x64/rustdesk-linux-x64.tar.gz \
+            artifacts/rustdesk-windows-x64/rustdesk-windows-x64.zip
