@@ -380,13 +380,6 @@ fn add_estimated_cursor_rel(dx: i32, dy: i32) {
     let cur = *est;
     let (cx, cy) = cur.unwrap_or((minx + (maxx - minx) / 2, miny + (maxy - miny) / 2));
     *est = Some(((cx + dx).clamp(minx, maxx), (cy + dy).clamp(miny, maxy)));
-    static CNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    if CNT.fetch_add(1, Ordering::Relaxed) % 30 == 0 {
-        log::info!(
-            "[relmouse] rel delta ({},{}) bounds=({},{},{},{}) -> est {:?}",
-            dx, dy, minx, maxx, miny, maxy, *est
-        );
-    }
 }
 
 #[inline]
@@ -446,7 +439,6 @@ fn run_pos(sp: EmptyExtraFieldService, state: &mut StatePos) -> ResultType<()> {
         } else {
             exclude
         };
-        log::info!("[relmouse] pos send ({},{}) exclude={}", x, y, exclude);
         sp.send_without(msg_out, exclude);
     }
     state.cursor_pos = (x, y);
@@ -606,8 +598,6 @@ pub fn try_start_record_cursor_pos() -> Option<thread::JoinHandle<()>> {
     // estimate there. Computed once (it spawns loginctl) and reused in the loop.
     #[cfg(target_os = "linux")]
     let is_wayland = crate::platform::linux::is_desktop_wayland();
-    #[cfg(target_os = "linux")]
-    log::info!("[relmouse] record_cursor_pos started, is_wayland={}", is_wayland);
     let handle = thread::spawn(move || {
         let interval = time::Duration::from_millis(33);
         loop {
