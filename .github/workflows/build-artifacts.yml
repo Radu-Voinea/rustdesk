@@ -139,7 +139,11 @@ jobs:
           # Force classic mode (repo root has a vcpkg.json that would trigger manifest
           # mode). scrap/build.rs expects $VCPKG_ROOT/installed/x64-windows-static.
           ( cd vcpkg && ./vcpkg.exe install --classic --triplet x64-windows-static libvpx libyuv opus aom )
-          echo "VCPKG_ROOT=$(pwd)/vcpkg" >> "$GITHUB_ENV"
+          # Export a Windows-style path (pwd -W -> D:/...), NOT the MSYS form
+          # ($(pwd) -> /d/...). The Rust build runs in PowerShell in a later step,
+          # where bindgen/clang and the MSVC linker can't resolve /d/... paths
+          # (e.g. "opus/opus_multistream.h file not found").
+          echo "VCPKG_ROOT=$(pwd -W)/vcpkg" >> "$GITHUB_ENV"
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
